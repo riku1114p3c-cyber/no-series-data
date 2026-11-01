@@ -85,7 +85,7 @@ FANG_USD = {2020: 101.99, 2021: 16.96, 2022: -40.32, 2023: 95.24, 2024: 51.99, 2
 FANG_USD_2026 = (82.55 / 68.05 - 1) * 100  # digrin の FNGS 月末価格（2025年12月 → 2026年9月）
 
 # MSCI ACWI（ドル・ネット）：MSCI ACWI Index (USD) ファクトシート
-ACWI_USD = {2016: 7.86, 2017: 23.97, 2018: -9.41, 2019: 26.60, 2020: 16.25, 2021: 18.54,
+ACWI_USD = {2012: 16.13, 2013: 22.80, 2014: 4.16, 2015: -2.36, 2016: 7.86, 2017: 23.97, 2018: -9.41, 2019: 26.60, 2020: 16.25, 2021: 18.54,
             2022: -18.36, 2023: 22.20, 2024: 17.49, 2025: 22.34}
 ACWI_USD_2026 = 13.03
 
@@ -115,6 +115,46 @@ NIKKEI_YEAR_END = {1994: 19723.06, 1995: 19868.15, 1996: 19361.35, 1997: 15258.7
                    2019: 23656.62, 2020: 27444.17, 2021: 28791.71, 2022: 26094.50, 2023: 33464.17,
                    2024: 39894.54, 2025: 50339.48}
 NIKKEI_2026_09 = 66753.72
+
+
+# ---------- 現実に近づけるための補正 ----------
+# 2002〜2011年の MSCI の古い円建て資料はグロス（配当にかかる税を引く前）のため、ネットに直す。
+# 補正幅は、MSCI ACWI（ドル・ネット）の設定来年率 7.41%（2000/12/29〜2026/9/30）と為替から逆算した
+# 2002年1月〜2026年9月の伸びに、データの積み上げが一致するように決めた（1年あたり約0.46%）
+GROSS_TO_NET_WORLD = 0.46
+GROSS_TO_NET_JAPAN = 0.30  # 日本株は配当利回りが低めのため、少し小さく
+
+# 信託報酬など、投資信託を持っているあいだにかかる費用（％・年）。
+# 指数そのものの数字には費用が入っていないため、代表的な低コストの投資信託の水準を引く。
+# ETF の数字を使っているカテゴリは ETF の経費がすでに入っているので、その差だけ引く
+FEE = {
+    "ALL_WORLD": 0.058,    # eMAXIS Slim 全世界株式（オール・カントリー）0.05775%
+    "WORLD_EX_JP": 0.058,  # eMAXIS Slim 全世界株式（除く日本）0.05775%
+    "DEVELOPED": 0.099,    # eMAXIS Slim 先進国株式インデックス 0.09889%
+    "SP500": 0.0,          # SPY（0.0945%）≒ eMAXIS Slim 米国株式（S&P500）0.0814%
+    "US_TOTAL": 0.13,      # 楽天・全米株式 0.162% − VTI 0.03%
+    "NASDAQ100": 0.0,      # QQQ（0.20%）≒ 国内のNASDAQ100インデックスファンド
+    "FANG_PLUS": 0.20,     # iFreeNEXT FANG+ 0.7755% − FNGS 0.58%
+    "TOPIX": 0.143,        # eMAXIS Slim 国内株式（TOPIX）0.143%
+    "NIKKEI225": 0.143,    # eMAXIS Slim 国内株式（日経平均）0.143%
+}
+
+
+def with_fee(periods, key):
+    """期間の騰落率から、その期間ぶんの費用を引く（複利で）"""
+    fee = FEE[key] / 100
+    out = []
+    for p in periods:
+        y0, m0 = map(int, p["from"].split("-"))
+        y1, m1 = map(int, p["to"].split("-"))
+        months = (y1 - y0) * 12 + (m1 - m0) + 1
+        r = ((1 + p["r"] / 100) * (1 - fee) ** (months / 12) - 1) * 100
+        out.append({**p, "r": round(r, 2)})
+    return out
+
+
+def gross_to_net(d, years, pct):
+    return {y: (((1 + v / 100) * (1 - pct / 100) - 1) * 100 if y in years else v) for y, v in d.items()}
 
 
 def nikkei_dividend(year: int) -> float:
@@ -147,15 +187,17 @@ def ytd(v):
 
 
 def build():
-    acwi = dict(ACWI_JPY_OLD)
+    old = range(2002, 2012)
+    acwi = gross_to_net({y: v for y, v in ACWI_JPY_OLD.items() if y in old}, old, GROSS_TO_NET_WORLD)
     for y, v in ACWI_USD.items():
         acwi[y] = to_jpy(v, fx_factor(y))
     acwi_2026 = to_jpy(ACWI_USD_2026, FX_2026)
 
-    world = dict(WORLD_JPY_OLD)
+    world = gross_to_net(WORLD_JPY_OLD, old, GROSS_TO_NET_WORLD)
     world.update(WORLD_JPY)
 
-    topix = dict(JAPAN_JPY)
+    japan = gross_to_net(JAPAN_JPY, old, GROSS_TO_NET_JAPAN)
+    topix = dict(japan)
     for y in TOPIX_TR_YEAR_END:
         if y - 1 in TOPIX_TR_YEAR_END:
             topix[y] = (TOPIX_TR_YEAR_END[y] / TOPIX_TR_YEAR_END[y - 1] - 1) * 100
@@ -168,9 +210,9 @@ def build():
 
     cats = {
         "ALL_WORLD": yearly(acwi) + ytd(acwi_2026),
-        "WORLD_EX_JP": yearly({y: ex_japan(v, JAPAN_JPY[y], japan_weight(y, True)) for y, v in acwi.items()})
+        "WORLD_EX_JP": yearly({y: ex_japan(v, japan[y], japan_weight(y, True)) for y, v in acwi.items()})
         + ytd(ex_japan(acwi_2026, JAPAN_JPY_2026, japan_weight(2026, True))),
-        "DEVELOPED": yearly({y: ex_japan(v, JAPAN_JPY[y], japan_weight(y, False)) for y, v in world.items()})
+        "DEVELOPED": yearly({y: ex_japan(v, japan[y], japan_weight(y, False)) for y, v in world.items()})
         + ytd(ex_japan(WORLD_JPY_2026, JAPAN_JPY_2026, japan_weight(2026, False))),
         "SP500": yearly({y: to_jpy(v, fx_factor(y)) for y, v in SP500_USD.items()})
         + ytd(to_jpy(monthly_total(SP500_USD_2026_M), FX_2026)),
@@ -183,10 +225,11 @@ def build():
         "TOPIX": yearly(topix) + ytd(JAPAN_JPY_2026),
         "NIKKEI225": yearly(nikkei) + ytd(nikkei_2026),
     }
+    cats = {k: with_fee(v, k) for k, v in cats.items()}
     return {
         "updated": UPDATED,
         "sample": False,
-        "note": "円建て・配当込みの騰落率（％）の目安。r は期間の騰落率。出典と計算方法は SOURCES.md",
+        "note": "円建て・配当込み・信託報酬の目安を差し引いた騰落率（％）。r は期間の騰落率。出典と計算方法は SOURCES.md",
         "categories": cats,
     }
 
